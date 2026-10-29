@@ -1,0 +1,66 @@
+name: Renew Twitch token
+
+on:
+  schedule:
+    # Daily at 09:17 UTC; renew only when seven days or less remain.
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Renew even if the current token is still valid
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: renew-twitch-token
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Check and renew the token
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          FORCE_RENEW: ${{ inputs.force || false }}
+        run: python3 .github/scripts/renew_twitch_token.py
+
+      - name: Commit and push the updated token
+        shell: bash
+        run: |
+          if git diff --quiet -- code; then
+            echo "No token change to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- code
+          git commit -m 'Renew Twitch app access token'
+          git push origin HEAD
+
+      - name: Publish the latest token on GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # GITHUB_TOKEN pushes do not automatically trigger branch-based Pages builds.
+          latest_build=$(gh api "repos/$GITHUB_REPOSITORY/pages/builds/latest")
+          published_commit=$(jq -r '.commit' <<< "$latest_build")
+          build_status=$(jq -r '.status' <<< "$latest_build")
+          if [[ "$published_commit" != "$(git rev-parse HEAD)" || "$build_status" == 'errored' ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" --silent
+            echo "Requested a GitHub Pages build."
+          else
+            echo "GitHub Pages already has the current revision."
+          fi
